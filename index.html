@@ -15,10 +15,10 @@
     .hidden { display: none !important; }
     .player-list { text-align: left; background: #0f3460; padding: 10px; border-radius: 8px; margin: 10px 0; }
     .player-item { display: flex; justify-content: space-between; margin: 5px 0; padding: 8px; background: #16213e; border-radius: 4px; }
-    .role-badge { background: #e94560; padding: 4px 8px; border-radius: 12px; font-weight: bold; }
+    .role-badge { background: #e94560; padding: 6px 12px; border-radius: 12px; font-weight: bold; font-size: 18px; display: inline-block; margin-top: 10px; }
+    .timer { font-size: 32px; font-weight: bold; color: #e94560; margin: 15px 0; }
   </style>
 
-  <!-- SDKs do Firebase com atributos para exibir logs detalhados em file:// -->
   <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js" crossorigin="anonymous"></script>
   <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js" crossorigin="anonymous"></script>
 </head>
@@ -26,7 +26,7 @@
 
   <h1>🌃 Cidade Dorme</h1>
 
-  <!-- TELA DE LOBBY/ENTRADA -->
+  <!-- LOBBY -->
   <div id="screen-lobby" class="card">
     <h2>Entre na Partida</h2>
     <input type="text" id="player-name" placeholder="Seu Nome" maxlength="15">
@@ -47,7 +47,7 @@
     <button class="secondary-btn" onclick="joinRoom()">Entrar com Código</button>
   </div>
 
-  <!-- TELA DE AGUARDO (SALA) -->
+  <!-- AGUARDO -->
   <div id="screen-room" class="card hidden">
     <h2>Sala: <span id="display-room-code"></span></h2>
     <button class="secondary-btn" onclick="copyRoomCode()">📋 Copiar Código</button>
@@ -59,23 +59,32 @@
     <p id="wait-message">Aguardando o líder iniciar...</p>
   </div>
 
-  <!-- TELA DO JOGO -->
+  <!-- REVELAÇÃO DO PAPEL (10 SEGUNDOS) -->
+  <div id="screen-reveal" class="card hidden">
+    <h2>Sua Função Secreta:</h2>
+    <div id="reveal-role" class="role-badge"></div>
+    <p style="margin-top:20px;">Memorize sua função! A noite começará em:</p>
+    <div id="reveal-timer" class="timer">10</div>
+  </div>
+
+  <!-- TELA DE JOGO -->
   <div id="screen-game" class="card hidden">
     <div id="game-status"></div>
-    <div id="player-role-info" style="margin: 15px 0;"></div>
 
+    <!-- Menu de Ação do Turno Específico -->
     <div id="night-action-panel" class="hidden">
       <h3 id="action-title">Sua Vez</h3>
       <select id="action-target"></select>
-      <button id="btn-submit-action" onclick="submitNightAction()">Confirmar Ação</button>
+      <button id="btn-submit-action" onclick="submitNightAction()">Confirmar Escolha</button>
       <button id="btn-skip-action" class="secondary-btn hidden" onclick="skipSheriffAction()">Pular Turno</button>
     </div>
 
+    <!-- Menu de Votação (Dia) -->
     <div id="vote-action-panel" class="hidden">
       <h3>Votação da Cidade</h3>
       <p>Quem você quer eliminar?</p>
       <select id="vote-target"></select>
-      <button onclick="submitVote()">Votar</button>
+      <button onclick="submitVote()">Confirmar Voto</button>
     </div>
 
     <h3>Jogadores na Cidade:</h3>
@@ -94,19 +103,15 @@
       measurementId: "G-CWWCZJP07K"
     };
 
-    let db;
-    try {
-      firebase.initializeApp(firebaseConfig);
-      db = firebase.database();
-    } catch(e) {
-      alert("Erro ao conectar no Firebase: " + e.message);
-    }
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
 
     let currentRoomId = null;
     let playerId = "player_" + Math.random().toString(36).substr(2, 9);
     let isHost = false;
     let myRole = null;
     let roomData = null;
+    let timerInterval = null;
 
     function showScreen(id) {
       document.querySelectorAll('.card').forEach(c => c.classList.add('hidden'));
@@ -129,6 +134,7 @@
       const initialRoomState = {
         host: playerId,
         state: "LOBBY",
+        turn: "NONE",
         players: {
           [playerId]: { name, emoji, isAlive: true, role: "NONE" }
         },
@@ -136,9 +142,7 @@
         votes: {}
       };
 
-      db.ref('rooms/' + currentRoomId).set(initialRoomState)
-        .then(() => listenRoom())
-        .catch(err => alert("Erro ao criar sala. Verifique as regras do seu Firebase!\nDetalhes: " + err.message));
+      db.ref('rooms/' + currentRoomId).set(initialRoomState).then(() => listenRoom());
     }
 
     function joinRoom() {
@@ -146,7 +150,7 @@
       const code = document.getElementById('room-code-input').value.trim().toUpperCase();
       const emoji = document.getElementById('player-emoji').value;
 
-      if(!name || !code) return alert("Preencha seu nome e o código da sala!");
+      if(!name || !code) return alert("Preencha seu nome e o código!");
 
       db.ref('rooms/' + code).once('value').then(snapshot => {
         if(!snapshot.exists()) return alert("Sala não encontrada!");
@@ -157,7 +161,7 @@
         db.ref(`rooms/${code}/players/${playerId}`).set({
           name, emoji, isAlive: true, role: "NONE"
         }).then(() => listenRoom());
-      }).catch(err => alert("Erro ao entrar: " + err.message));
+      });
     }
 
     function listenRoom() {
@@ -189,6 +193,8 @@
 
       if(roomData.state === "LOBBY") {
         showScreen('screen-room');
+      } else if(roomData.state === "REVEAL") {
+        handleRevealPhase();
       } else {
         showScreen('screen-game');
         renderGameBoard();
@@ -212,21 +218,47 @@
         updates[`/rooms/${currentRoomId}/players/${key}/isAlive`] = true;
       });
 
-      updates[`/rooms/${currentRoomId}/state`] = "NIGHT";
+      updates[`/rooms/${currentRoomId}/state`] = "REVEAL";
+      updates[`/rooms/${currentRoomId}/turn`] = "KILLER";
       updates[`/rooms/${currentRoomId}/actions`] = { killer: null, medic: null, sheriff: null };
       updates[`/rooms/${currentRoomId}/votes`] = {};
 
       db.ref().update(updates);
     }
 
+    // FASE DE REVELAÇÃO (10s)
+    function handleRevealPhase() {
+      showScreen('screen-reveal');
+      const me = roomData.players[playerId];
+      if(!me) return;
+
+      document.getElementById('reveal-role').innerText = me.role;
+
+      if(isHost && !timerInterval) {
+        let timeLeft = 10;
+        db.ref(`rooms/${currentRoomId}/timer`).set(timeLeft);
+
+        timerInterval = setInterval(() => {
+          timeLeft--;
+          db.ref(`rooms/${currentRoomId}/timer`).set(timeLeft);
+          
+          if(timeLeft <= 0) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            db.ref(`rooms/${currentRoomId}`).update({ state: "NIGHT" });
+          }
+        }, 1000);
+      }
+
+      if(roomData.timer !== undefined) {
+        document.getElementById('reveal-timer').innerText = roomData.timer;
+      }
+    }
+
     function renderGameBoard() {
       const me = roomData.players[playerId];
       if(!me) return;
       myRole = me.role;
-
-      document.getElementById('player-role-info').innerHTML = `
-        <p>Sua Função: <span class="role-badge">${myRole}</span> ${me.isAlive ? '(Vivo)' : '💀 (Morto)'}</p>
-      `;
 
       const gamePlayers = document.getElementById('game-players');
       gamePlayers.innerHTML = "";
@@ -239,14 +271,12 @@
       });
 
       if(roomData.state === "NIGHT") {
-        document.getElementById('game-status').innerHTML = "<h2>🌙 A Cidade Dorme...</h2><p>Aguardando os turnos das profissões.</p>";
         document.getElementById('vote-action-panel').classList.add('hidden');
-        setupNightActions(me);
-        if(isHost) checkNightResolution();
+        renderNightTurns(me);
       }
 
       if(roomData.state === "DAY") {
-        document.getElementById('game-status').innerHTML = "<h2>☀️ O Dia Amanheceu!</h2>";
+        document.getElementById('game-status').innerHTML = "<h2>☀️ O Dia Amanheceu!</h2><p>A cidade debate sobre quem eliminar.</p>";
         document.getElementById('night-action-panel').classList.add('hidden');
         setupDayVoting(me);
         if(isHost) checkDayResolution();
@@ -259,22 +289,30 @@
       }
     }
 
-    function setupNightActions(me) {
+    // TURNO DA NOITE SEQUENCIAL (Assassino -> Médico -> Xerife)
+    function renderNightTurns(me) {
       const panel = document.getElementById('night-action-panel');
       const targetSelect = document.getElementById('action-target');
       const skipBtn = document.getElementById('btn-skip-action');
       const title = document.getElementById('action-title');
+      const status = document.getElementById('game-status');
 
-      if(!me.isAlive || myRole === "INOCENTE") {
-        panel.classList.add('hidden');
-        return;
-      }
+      const turn = roomData.turn;
 
-      const actions = roomData.actions || {};
-      if((myRole === "ASSASSINO" && actions.killer !== null) ||
-         (myRole === "MEDICO" && actions.medic !== null) ||
-         (myRole === "XERIFE" && actions.sheriff !== null)) {
+      // Atualiza texto de status geral do turno da noite
+      if(turn === "KILLER") status.innerHTML = "<h2>🌙 Turno do Assassino</h2><p>O assassino está escolhendo sua vítima...</p>";
+      if(turn === "MEDIC") status.innerHTML = "<h2>🌙 Turno do Médico</h2><p>O médico está escolhendo quem salvar...</p>";
+      if(turn === "SHERIFF") status.innerHTML = "<h2>🌙 Turno do Xerife</h2><p>O xerife está decidindo se vai agir...</p>";
+
+      // Se a pessoa está morta ou não é a vez do papel dela
+      const isMyTurn = (turn === "KILLER" && myRole === "ASSASSINO") ||
+                       (turn === "MEDIC" && myRole === "MEDICO") ||
+                       (turn === "SHERIFF" && myRole === "XERIFE");
+
+      if(!me.isAlive || !isMyTurn) {
         panel.classList.add('hidden');
+        // Caso a pessoa desta profissão esteja morta, o líder pula o turno automaticamente
+        if(isHost) checkDeadTurnSkip();
         return;
       }
 
@@ -282,10 +320,10 @@
       targetSelect.innerHTML = "";
       skipBtn.classList.add('hidden');
 
-      if(myRole === "ASSASSINO") title.innerText = "Escolha alguém para eliminar:";
-      if(myRole === "MEDICO") title.innerText = "Escolha alguém para salvar:";
+      if(myRole === "ASSASSINO") title.innerText = "Sua Vez! Escolha quem eliminar:";
+      if(myRole === "MEDICO") title.innerText = "Sua Vez! Escolha quem salvar:";
       if(myRole === "XERIFE") {
-        title.innerText = "Deseja atirar em alguém?";
+        title.innerText = "Sua Vez! Quem você deseja atirar?";
         skipBtn.classList.remove('hidden');
       }
 
@@ -296,49 +334,80 @@
       });
     }
 
+    function checkDeadTurnSkip() {
+      const turn = roomData.turn;
+      const alivePlayers = Object.values(roomData.players).filter(p => p.isAlive);
+      const roleAlive = alivePlayers.some(p => 
+        (turn === "KILLER" && p.role === "ASSASSINO") ||
+        (turn === "MEDIC" && p.role === "MEDICO") ||
+        (turn === "SHERIFF" && p.role === "XERIFE")
+      );
+
+      // Se o dono da profissão atual estiver morto, passa pro próximo
+      if(!roleAlive) {
+        advanceTurn();
+      }
+    }
+
     function submitNightAction() {
       const target = document.getElementById('action-target').value;
       const roleKey = myRole === "ASSASSINO" ? "killer" : myRole === "MEDICO" ? "medic" : "sheriff";
-      db.ref(`rooms/${currentRoomId}/actions/${roleKey}`).set(target);
+      
+      db.ref(`rooms/${currentRoomId}/actions/${roleKey}`).set(target).then(() => {
+        advanceTurn();
+      });
     }
 
     function skipSheriffAction() {
-      db.ref(`rooms/${currentRoomId}/actions/sheriff`).set("SKIP");
+      db.ref(`rooms/${currentRoomId}/actions/sheriff`).set("SKIP").then(() => {
+        advanceTurn();
+      });
     }
 
-    function checkNightResolution() {
-      const actions = roomData.actions || {};
-      const aliveRoles = Object.values(roomData.players).filter(p => p.isAlive).map(p => p.role);
+    function advanceTurn() {
+      const turn = roomData.turn;
+      let nextTurn = "NONE";
 
-      const needsKiller = aliveRoles.includes("ASSASSINO") && (actions.killer === undefined || actions.killer === null);
-      const needsMedic = aliveRoles.includes("MEDICO") && (actions.medic === undefined || actions.medic === null);
-      const needsSheriff = aliveRoles.includes("XERIFE") && (actions.sheriff === undefined || actions.sheriff === null);
-
-      if(!needsKiller && !needsMedic && !needsSheriff) {
-        let updates = {};
-        let killedPlayers = [];
-
-        if(actions.killer && actions.killer !== actions.medic) {
-          killedPlayers.push(actions.killer);
-        }
-
-        if(actions.sheriff && actions.sheriff !== "SKIP") {
-          const target = roomData.players[actions.sheriff];
-          if(target && target.role === "ASSASSINO") {
-            killedPlayers.push(actions.sheriff);
-          } else {
-            const sheriffId = Object.keys(roomData.players).find(k => roomData.players[k].role === "XERIFE");
-            if(sheriffId) killedPlayers.push(sheriffId);
-          }
-        }
-
-        killedPlayers.forEach(id => {
-          updates[`/rooms/${currentRoomId}/players/${id}/isAlive`] = false;
-        });
-
-        updates[`/rooms/${currentRoomId}/state`] = "DAY";
-        db.ref().update(updates).then(() => checkWinConditions());
+      if(turn === "KILLER") nextTurn = "MEDIC";
+      else if(turn === "MEDIC") nextTurn = "SHERIFF";
+      else if(turn === "SHERIFF") {
+        resolveNight();
+        return;
       }
+
+      db.ref(`rooms/${currentRoomId}`).update({ turn: nextTurn });
+    }
+
+    function resolveNight() {
+      if(!isHost) return;
+
+      const actions = roomData.actions || {};
+      let updates = {};
+      let killedPlayers = [];
+
+      // Ação do Assassino x Médico
+      if(actions.killer && actions.killer !== actions.medic) {
+        killedPlayers.push(actions.killer);
+      }
+
+      // Ação do Xerife
+      if(actions.sheriff && actions.sheriff !== "SKIP") {
+        const target = roomData.players[actions.sheriff];
+        if(target && target.role === "ASSASSINO") {
+          killedPlayers.push(actions.sheriff);
+        } else {
+          // Xerife errou: ele mesmo morre
+          const sheriffId = Object.keys(roomData.players).find(k => roomData.players[k].role === "XERIFE");
+          if(sheriffId) killedPlayers.push(sheriffId);
+        }
+      }
+
+      killedPlayers.forEach(id => {
+        updates[`/rooms/${currentRoomId}/players/${id}/isAlive`] = false;
+      });
+
+      updates[`/rooms/${currentRoomId}/state`] = "DAY";
+      db.ref().update(updates).then(() => checkWinConditions());
     }
 
     function setupDayVoting(me) {
@@ -390,6 +459,7 @@
         }
 
         updates[`/rooms/${currentRoomId}/state`] = "NIGHT";
+        updates[`/rooms/${currentRoomId}/turn`] = "KILLER";
         updates[`/rooms/${currentRoomId}/actions`] = { killer: null, medic: null, sheriff: null };
         updates[`/rooms/${currentRoomId}/votes`] = {};
 
