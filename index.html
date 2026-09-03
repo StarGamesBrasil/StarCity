@@ -16,7 +16,7 @@
     .player-list { text-align: left; background: #0f3460; padding: 10px; border-radius: 8px; margin: 10px 0; }
     .player-item { display: flex; justify-content: space-between; margin: 5px 0; padding: 8px; background: #16213e; border-radius: 4px; }
     .role-badge { background: #e94560; padding: 6px 12px; border-radius: 12px; font-weight: bold; font-size: 18px; display: inline-block; margin-top: 10px; }
-    .timer { font-size: 32px; font-weight: bold; color: #e94560; margin: 15px 0; }
+    .timer { font-size: 32px; font-weight: bold; color: #e94560; margin: 10px 0; }
   </style>
 
   <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js" crossorigin="anonymous"></script>
@@ -59,7 +59,7 @@
     <p id="wait-message">Aguardando o líder iniciar...</p>
   </div>
 
-  <!-- REVELAÇÃO DO PAPEL (10 SEGUNDOS) -->
+  <!-- REVELAÇÃO DO PAPEL -->
   <div id="screen-reveal" class="card hidden">
     <h2>Sua Função Secreta:</h2>
     <div id="reveal-role" class="role-badge"></div>
@@ -70,8 +70,9 @@
   <!-- TELA DE JOGO -->
   <div id="screen-game" class="card hidden">
     <div id="game-status"></div>
+    <div id="turn-timer" class="timer">15</div>
 
-    <!-- Menu de Ação do Turno Específico -->
+    <!-- Menu de Ação da Noite -->
     <div id="night-action-panel" class="hidden">
       <h3 id="action-title">Sua Vez</h3>
       <select id="action-target"></select>
@@ -111,7 +112,8 @@
     let isHost = false;
     let myRole = null;
     let roomData = null;
-    let timerInterval = null;
+    let hostTimerInterval = null;
+    let currentSelectState = { night: null, day: null };
 
     function showScreen(id) {
       document.querySelectorAll('.card').forEach(c => c.classList.add('hidden'));
@@ -135,6 +137,7 @@
         host: playerId,
         state: "LOBBY",
         turn: "NONE",
+        timer: 15,
         players: {
           [playerId]: { name, emoji, isAlive: true, role: "NONE" }
         },
@@ -220,13 +223,31 @@
 
       updates[`/rooms/${currentRoomId}/state`] = "REVEAL";
       updates[`/rooms/${currentRoomId}/turn`] = "KILLER";
+      updates[`/rooms/${currentRoomId}/timer`] = 10;
       updates[`/rooms/${currentRoomId}/actions`] = { killer: null, medic: null, sheriff: null };
       updates[`/rooms/${currentRoomId}/votes`] = {};
 
       db.ref().update(updates);
     }
 
-    // FASE DE REVELAÇÃO (10s)
+    function startHostTimer(seconds, onComplete) {
+      if(!isHost) return;
+      if(hostTimerInterval) clearInterval(hostTimerInterval);
+
+      let timeLeft = seconds;
+      db.ref(`rooms/${currentRoomId}/timer`).set(timeLeft);
+
+      hostTimerInterval = setInterval(() => {
+        timeLeft--;
+        db.ref(`rooms/${currentRoomId}/timer`).set(timeLeft);
+        if(timeLeft <= 0) {
+          clearInterval(hostTimerInterval);
+          hostTimerInterval = null;
+          onComplete();
+        }
+      }, 1000);
+    }
+
     function handleRevealPhase() {
       showScreen('screen-reveal');
       const me = roomData.players[playerId];
@@ -234,20 +255,10 @@
 
       document.getElementById('reveal-role').innerText = me.role;
 
-      if(isHost && !timerInterval) {
-        let timeLeft = 10;
-        db.ref(`rooms/${currentRoomId}/timer`).set(timeLeft);
-
-        timerInterval = setInterval(() => {
-          timeLeft--;
-          db.ref(`rooms/${currentRoomId}/timer`).set(timeLeft);
-          
-          if(timeLeft <= 0) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-            db.ref(`rooms/${currentRoomId}`).update({ state: "NIGHT" });
-          }
-        }, 1000);
+      if(isHost && !hostTimerInterval) {
+        startHostTimer(10, () => {
+          db.ref(`rooms/${currentRoomId}`).update({ state: "NIGHT", timer: 15 });
+        });
       }
 
       if(roomData.timer !== undefined) {
@@ -259,6 +270,8 @@
       const me = roomData.players[playerId];
       if(!me) return;
       myRole = me.role;
+
+      document.getElementById('turn-timer').innerText = roomData.timer !== undefined ? roomData.timer : 15;
 
       const gamePlayers = document.getElementById('game-players');
       gamePlayers.innerHTML = "";
@@ -279,17 +292,21 @@
         document.getElementById('game-status').innerHTML = "<h2>☀️ O Dia Amanheceu!</h2><p>A cidade debate sobre quem eliminar.</p>";
         document.getElementById('night-action-panel').classList.add('hidden');
         setupDayVoting(me);
-        if(isHost) checkDayResolution();
+        
+        if(isHost && !hostTimerInterval) {
+          startHostTimer(15, () => checkDayResolution(true));
+        }
       }
 
       if(roomData.state === "GAME_OVER") {
+        if(hostTimerInterval) clearInterval(hostTimerInterval);
         document.getElementById('night-action-panel').classList.add('hidden');
         document.getElementById('vote-action-panel').classList.add('hidden');
+        document.getElementById('turn-timer').classList.add('hidden');
         document.getElementById('game-status').innerHTML = `<h2>🏆 Fim de Jogo!</h2><h3>${roomData.winner}</h3>`;
       }
     }
 
-    // TURNO DA NOITE SEQUENCIAL (Assassino -> Médico -> Xerife)
     function renderNightTurns(me) {
       const panel = document.getElementById('night-action-panel');
       const targetSelect = document.getElementById('action-target');
@@ -299,72 +316,69 @@
 
       const turn = roomData.turn;
 
-      // Atualiza texto de status geral do turno da noite
-      if(turn === "KILLER") status.innerHTML = "<h2>🌙 Turno do Assassino</h2><p>O assassino está escolhendo sua vítima...</p>";
-      if(turn === "MEDIC") status.innerHTML = "<h2>🌙 Turno do Médico</h2><p>O médico está escolhendo quem salvar...</p>";
-      if(turn === "SHERIFF") status.innerHTML = "<h2>🌙 Turno do Xerife</h2><p>O xerife está decidindo se vai agir...</p>";
+      if(turn === "KILLER") status.innerHTML = "<h2>🌙 Turno do Assassino</h2><p>Escolha sua vítima (15s)</p>";
+      if(turn === "MEDIC") status.innerHTML = "<h2>🌙 Turno do Médico</h2><p>Escolha quem salvar (15s)</p>";
+      if(turn === "SHERIFF") status.innerHTML = "<h2>🌙 Turno do Xerife</h2><p>Decida se vai atirar (15s)</p>";
 
-      // Se a pessoa está morta ou não é a vez do papel dela
+      if(isHost && !hostTimerInterval) {
+        startHostTimer(15, () => advanceTurn());
+      }
+
       const isMyTurn = (turn === "KILLER" && myRole === "ASSASSINO") ||
                        (turn === "MEDIC" && myRole === "MEDICO") ||
                        (turn === "SHERIFF" && myRole === "XERIFE");
 
       if(!me.isAlive || !isMyTurn) {
         panel.classList.add('hidden');
-        // Caso a pessoa desta profissão esteja morta, o líder pula o turno automaticamente
-        if(isHost) checkDeadTurnSkip();
+        return;
+      }
+
+      // Se a ação já foi enviada neste turno, oculta o painel
+      const actions = roomData.actions || {};
+      if((turn === "KILLER" && actions.killer) ||
+         (turn === "MEDIC" && actions.medic) ||
+         (turn === "SHERIFF" && actions.sheriff)) {
+        panel.classList.add('hidden');
         return;
       }
 
       panel.classList.remove('hidden');
-      targetSelect.innerHTML = "";
       skipBtn.classList.add('hidden');
 
-      if(myRole === "ASSASSINO") title.innerText = "Sua Vez! Escolha quem eliminar:";
-      if(myRole === "MEDICO") title.innerText = "Sua Vez! Escolha quem salvar:";
+      if(myRole === "ASSASSINO") title.innerText = "Escolha alguém para eliminar:";
+      if(myRole === "MEDICO") title.innerText = "Escolha alguém para salvar:";
       if(myRole === "XERIFE") {
-        title.innerText = "Sua Vez! Quem você deseja atirar?";
+        title.innerText = "Atirar em um suspeito:";
         skipBtn.classList.remove('hidden');
       }
 
+      // Preenche o Select mantendo a seleção do usuário se já existente
+      const currentSelected = targetSelect.value;
+      targetSelect.innerHTML = "";
       Object.entries(roomData.players).forEach(([id, p]) => {
         if(p.isAlive && id !== playerId) {
-          targetSelect.innerHTML += `<option value="${id}">${p.emoji} ${p.name}</option>`;
+          const selected = (currentSelected === id) ? "selected" : "";
+          targetSelect.innerHTML += `<option value="${id}" ${selected}>${p.emoji} ${p.name}</option>`;
         }
       });
     }
 
-    function checkDeadTurnSkip() {
-      const turn = roomData.turn;
-      const alivePlayers = Object.values(roomData.players).filter(p => p.isAlive);
-      const roleAlive = alivePlayers.some(p => 
-        (turn === "KILLER" && p.role === "ASSASSINO") ||
-        (turn === "MEDIC" && p.role === "MEDICO") ||
-        (turn === "SHERIFF" && p.role === "XERIFE")
-      );
-
-      // Se o dono da profissão atual estiver morto, passa pro próximo
-      if(!roleAlive) {
-        advanceTurn();
-      }
-    }
-
     function submitNightAction() {
       const target = document.getElementById('action-target').value;
+      if(!target) return;
+
       const roleKey = myRole === "ASSASSINO" ? "killer" : myRole === "MEDICO" ? "medic" : "sheriff";
-      
-      db.ref(`rooms/${currentRoomId}/actions/${roleKey}`).set(target).then(() => {
-        advanceTurn();
-      });
+      db.ref(`rooms/${currentRoomId}/actions/${roleKey}`).set(target).then(() => advanceTurn());
     }
 
     function skipSheriffAction() {
-      db.ref(`rooms/${currentRoomId}/actions/sheriff`).set("SKIP").then(() => {
-        advanceTurn();
-      });
+      db.ref(`rooms/${currentRoomId}/actions/sheriff`).set("SKIP").then(() => advanceTurn());
     }
 
     function advanceTurn() {
+      if(!isHost) return;
+      if(hostTimerInterval) { clearInterval(hostTimerInterval); hostTimerInterval = null; }
+
       const turn = roomData.turn;
       let nextTurn = "NONE";
 
@@ -375,7 +389,7 @@
         return;
       }
 
-      db.ref(`rooms/${currentRoomId}`).update({ turn: nextTurn });
+      db.ref(`rooms/${currentRoomId}`).update({ turn: nextTurn, timer: 15 });
     }
 
     function resolveNight() {
@@ -385,18 +399,15 @@
       let updates = {};
       let killedPlayers = [];
 
-      // Ação do Assassino x Médico
       if(actions.killer && actions.killer !== actions.medic) {
         killedPlayers.push(actions.killer);
       }
 
-      // Ação do Xerife
       if(actions.sheriff && actions.sheriff !== "SKIP") {
         const target = roomData.players[actions.sheriff];
         if(target && target.role === "ASSASSINO") {
           killedPlayers.push(actions.sheriff);
         } else {
-          // Xerife errou: ele mesmo morre
           const sheriffId = Object.keys(roomData.players).find(k => roomData.players[k].role === "XERIFE");
           if(sheriffId) killedPlayers.push(sheriffId);
         }
@@ -407,6 +418,7 @@
       });
 
       updates[`/rooms/${currentRoomId}/state`] = "DAY";
+      updates[`/rooms/${currentRoomId}/timer`] = 15;
       db.ref().update(updates).then(() => checkWinConditions());
     }
 
@@ -420,25 +432,33 @@
       }
 
       panel.classList.remove('hidden');
-      targetSelect.innerHTML = "";
 
+      const currentSelected = targetSelect.value;
+      targetSelect.innerHTML = "";
       Object.entries(roomData.players).forEach(([id, p]) => {
         if(p.isAlive) {
-          targetSelect.innerHTML += `<option value="${id}">${p.emoji} ${p.name}</option>`;
+          const selected = (currentSelected === id) ? "selected" : "";
+          targetSelect.innerHTML += `<option value="${id}" ${selected}>${p.emoji} ${p.name}</option>`;
         }
       });
     }
 
     function submitVote() {
       const target = document.getElementById('vote-target').value;
-      db.ref(`rooms/${currentRoomId}/votes/${playerId}`).set(target);
+      db.ref(`rooms/${currentRoomId}/votes/${playerId}`).set(target).then(() => {
+        if(isHost) checkDayResolution(false);
+      });
     }
 
-    function checkDayResolution() {
+    function checkDayResolution(forceByTimer = false) {
+      if(!isHost) return;
+
       const votes = roomData.votes || {};
       const alivePlayers = Object.entries(roomData.players).filter(([_, p]) => p.isAlive);
 
-      if(Object.keys(votes).length >= alivePlayers.length && alivePlayers.length > 0) {
+      if(forceByTimer || Object.keys(votes).length >= alivePlayers.length) {
+        if(hostTimerInterval) { clearInterval(hostTimerInterval); hostTimerInterval = null; }
+
         const voteCounts = {};
         Object.values(votes).forEach(target => {
           voteCounts[target] = (voteCounts[target] || 0) + 1;
@@ -460,6 +480,7 @@
 
         updates[`/rooms/${currentRoomId}/state`] = "NIGHT";
         updates[`/rooms/${currentRoomId}/turn`] = "KILLER";
+        updates[`/rooms/${currentRoomId}/timer`] = 15;
         updates[`/rooms/${currentRoomId}/actions`] = { killer: null, medic: null, sheriff: null };
         updates[`/rooms/${currentRoomId}/votes`] = {};
 
