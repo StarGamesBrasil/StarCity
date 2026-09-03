@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cidade Dorme Online</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a2e; color: #fff; text-align: center; margin: 0; padding: 20px; }
+    .card { background: #16213e; max-width: 450px; margin: 20px auto; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+    input, button, select { width: 90%; padding: 12px; margin: 8px 0; border-radius: 8px; border: none; font-size: 16px; box-sizing: border-box; }
+    button { background: #e94560; color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:hover { background: #ff6b81; }
+    .secondary-btn { background: #0f3460; }
+    .secondary-btn:hover { background: #1a4f8a; }
+    .hidden { display: none !important; }
+    .player-list { text-align: left; background: #0f3460; padding: 10px; border-radius: 8px; margin: 10px 0; }
+    .player-item { display: flex; justify-content: space-between; margin: 5px 0; padding: 8px; background: #16213e; border-radius: 4px; }
+    .role-badge { background: #e94560; padding: 4px 8px; border-radius: 12px; font-weight: bold; }
+  </style>
+
+  <!-- SDKs do Firebase com atributos para exibir logs detalhados em file:// -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <h1>🌃 Cidade Dorme</h1>
+
+  <!-- TELA DE LOBBY/ENTRADA -->
+  <div id="screen-lobby" class="card">
+    <h2>Entre na Partida</h2>
+    <input type="text" id="player-name" placeholder="Seu Nome" maxlength="15">
+    
+    <label for="player-emoji" style="display:block; margin-top:10px;">Escolha seu Emoji:</label>
+    <select id="player-emoji">
+      <option value="🕵️">🕵️ Detetive</option>
+      <option value="🥷">🥷 Ninja</option>
+      <option value="🧟">🧟 Zumbi</option>
+      <option value="🦊">🦊 Raposa</option>
+      <option value="🤖">🤖 Robô</option>
+      <option value="👑">👑 Rei</option>
+    </select>
+
+    <button onclick="createRoom()">Criar Nova Partida</button>
+    <hr style="border: 0.5px solid #333; margin: 15px 0;">
+    <input type="text" id="room-code-input" placeholder="Código da Sala">
+    <button class="secondary-btn" onclick="joinRoom()">Entrar com Código</button>
+  </div>
+
+  <!-- TELA DE AGUARDO (SALA) -->
+  <div id="screen-room" class="card hidden">
+    <h2>Sala: <span id="display-room-code"></span></h2>
+    <button class="secondary-btn" onclick="copyRoomCode()">📋 Copiar Código</button>
+    <h3>Jogadores Conectados:</h3>
+    <div id="room-players" class="player-list"></div>
+    <div id="host-controls" class="hidden">
+      <button onclick="startGame()">Iniciar Jogo</button>
+    </div>
+    <p id="wait-message">Aguardando o líder iniciar...</p>
+  </div>
+
+  <!-- TELA DO JOGO -->
+  <div id="screen-game" class="card hidden">
+    <div id="game-status"></div>
+    <div id="player-role-info" style="margin: 15px 0;"></div>
+
+    <div id="night-action-panel" class="hidden">
+      <h3 id="action-title">Sua Vez</h3>
+      <select id="action-target"></select>
+      <button id="btn-submit-action" onclick="submitNightAction()">Confirmar Ação</button>
+      <button id="btn-skip-action" class="secondary-btn hidden" onclick="skipSheriffAction()">Pular Turno</button>
+    </div>
+
+    <div id="vote-action-panel" class="hidden">
+      <h3>Votação da Cidade</h3>
+      <p>Quem você quer eliminar?</p>
+      <select id="vote-target"></select>
+      <button onclick="submitVote()">Votar</button>
+    </div>
+
+    <h3>Jogadores na Cidade:</h3>
+    <div id="game-players" class="player-list"></div>
+  </div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyDKet8t681NI31kdYgOp2cXxjXeZ827Hbc",
+      authDomain: "starcity-ecc2d.firebaseapp.com",
+      databaseURL: "https://starcity-ecc2d-default-rtdb.firebaseio.com",
+      projectId: "starcity-ecc2d",
+      storageBucket: "starcity-ecc2d.firebasestorage.app",
+      messagingSenderId: "281573992249",
+      appId: "1:281573992249:web:8406b0f1a3cf582ae3aae8",
+      measurementId: "G-CWWCZJP07K"
+    };
+
+    let db;
+    try {
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.database();
+    } catch(e) {
+      alert("Erro ao conectar no Firebase: " + e.message);
+    }
+
+    let currentRoomId = null;
+    let playerId = "player_" + Math.random().toString(36).substr(2, 9);
+    let isHost = false;
+    let myRole = null;
+    let roomData = null;
+
+    function showScreen(id) {
+      document.querySelectorAll('.card').forEach(c => c.classList.add('hidden'));
+      document.getElementById(id).classList.remove('hidden');
+    }
+
+    function copyRoomCode() {
+      navigator.clipboard.writeText(currentRoomId);
+      alert("Código copiado: " + currentRoomId);
+    }
+
+    function createRoom() {
+      const name = document.getElementById('player-name').value.trim();
+      const emoji = document.getElementById('player-emoji').value;
+      if(!name) return alert("Digite seu nome!");
+
+      currentRoomId = Math.random().toString(36).substr(2, 6).toUpperCase();
+      isHost = true;
+
+      const initialRoomState = {
+        host: playerId,
+        state: "LOBBY",
+        players: {
+          [playerId]: { name, emoji, isAlive: true, role: "NONE" }
+        },
+        actions: { killer: null, medic: null, sheriff: null },
+        votes: {}
+      };
+
+      db.ref('rooms/' + currentRoomId).set(initialRoomState)
+        .then(() => listenRoom())
+        .catch(err => alert("Erro ao criar sala. Verifique as regras do seu Firebase!\nDetalhes: " + err.message));
+    }
+
+    function joinRoom() {
+      const name = document.getElementById('player-name').value.trim();
+      const code = document.getElementById('room-code-input').value.trim().toUpperCase();
+      const emoji = document.getElementById('player-emoji').value;
+
+      if(!name || !code) return alert("Preencha seu nome e o código da sala!");
+
+      db.ref('rooms/' + code).once('value').then(snapshot => {
+        if(!snapshot.exists()) return alert("Sala não encontrada!");
+
+        currentRoomId = code;
+        isHost = false;
+
+        db.ref(`rooms/${code}/players/${playerId}`).set({
+          name, emoji, isAlive: true, role: "NONE"
+        }).then(() => listenRoom());
+      }).catch(err => alert("Erro ao entrar: " + err.message));
+    }
+
+    function listenRoom() {
+      showScreen('screen-room');
+      document.getElementById('display-room-code').innerText = currentRoomId;
+
+      db.ref('rooms/' + currentRoomId).on('value', snapshot => {
+        roomData = snapshot.val();
+        if(!roomData) return;
+
+        updateRoomUI();
+      });
+    }
+
+    function updateRoomUI() {
+      const playerList = document.getElementById('room-players');
+      playerList.innerHTML = "";
+
+      if(roomData.players) {
+        Object.entries(roomData.players).forEach(([id, p]) => {
+          playerList.innerHTML += `<div class="player-item"><span>${p.emoji} ${p.name}</span> ${id === roomData.host ? '👑 Líder' : ''}</div>`;
+        });
+      }
+
+      if(isHost && roomData.state === "LOBBY") {
+        document.getElementById('host-controls').classList.remove('hidden');
+        document.getElementById('wait-message').classList.add('hidden');
+      }
+
+      if(roomData.state === "LOBBY") {
+        showScreen('screen-room');
+      } else {
+        showScreen('screen-game');
+        renderGameBoard();
+      }
+    }
+
+    function startGame() {
+      const playersKeys = Object.keys(roomData.players);
+      if(playersKeys.length < 3) return alert("É necessário no mínimo 3 jogadores!");
+
+      const roles = ["ASSASSINO", "MEDICO", "XERIFE"];
+      while(roles.length < playersKeys.length) {
+        roles.push("INOCENTE");
+      }
+
+      const shuffledRoles = roles.sort(() => Math.random() - 0.5);
+      const updates = {};
+
+      playersKeys.forEach((key, index) => {
+        updates[`/rooms/${currentRoomId}/players/${key}/role`] = shuffledRoles[index];
+        updates[`/rooms/${currentRoomId}/players/${key}/isAlive`] = true;
+      });
+
+      updates[`/rooms/${currentRoomId}/state`] = "NIGHT";
+      updates[`/rooms/${currentRoomId}/actions`] = { killer: null, medic: null, sheriff: null };
+      updates[`/rooms/${currentRoomId}/votes`] = {};
+
+      db.ref().update(updates);
+    }
+
+    function renderGameBoard() {
+      const me = roomData.players[playerId];
+      if(!me) return;
+      myRole = me.role;
+
+      document.getElementById('player-role-info').innerHTML = `
+        <p>Sua Função: <span class="role-badge">${myRole}</span> ${me.isAlive ? '(Vivo)' : '💀 (Morto)'}</p>
+      `;
+
+      const gamePlayers = document.getElementById('game-players');
+      gamePlayers.innerHTML = "";
+      Object.entries(roomData.players).forEach(([id, p]) => {
+        gamePlayers.innerHTML += `
+          <div class="player-item">
+            <span>${p.emoji} ${p.name}</span>
+            <span>${p.isAlive ? '🟢 Vivo' : '💀 Morto'}</span>
+          </div>`;
+      });
+
+      if(roomData.state === "NIGHT") {
+        document.getElementById('game-status').innerHTML = "<h2>🌙 A Cidade Dorme...</h2><p>Aguardando os turnos das profissões.</p>";
+        document.getElementById('vote-action-panel').classList.add('hidden');
+        setupNightActions(me);
+        if(isHost) checkNightResolution();
+      }
+
+      if(roomData.state === "DAY") {
+        document.getElementById('game-status').innerHTML = "<h2>☀️ O Dia Amanheceu!</h2>";
+        document.getElementById('night-action-panel').classList.add('hidden');
+        setupDayVoting(me);
+        if(isHost) checkDayResolution();
+      }
+
+      if(roomData.state === "GAME_OVER") {
+        document.getElementById('night-action-panel').classList.add('hidden');
+        document.getElementById('vote-action-panel').classList.add('hidden');
+        document.getElementById('game-status').innerHTML = `<h2>🏆 Fim de Jogo!</h2><h3>${roomData.winner}</h3>`;
+      }
+    }
+
+    function setupNightActions(me) {
+      const panel = document.getElementById('night-action-panel');
+      const targetSelect = document.getElementById('action-target');
+      const skipBtn = document.getElementById('btn-skip-action');
+      const title = document.getElementById('action-title');
+
+      if(!me.isAlive || myRole === "INOCENTE") {
+        panel.classList.add('hidden');
+        return;
+      }
+
+      const actions = roomData.actions || {};
+      if((myRole === "ASSASSINO" && actions.killer !== null) ||
+         (myRole === "MEDICO" && actions.medic !== null) ||
+         (myRole === "XERIFE" && actions.sheriff !== null)) {
+        panel.classList.add('hidden');
+        return;
+      }
+
+      panel.classList.remove('hidden');
+      targetSelect.innerHTML = "";
+      skipBtn.classList.add('hidden');
+
+      if(myRole === "ASSASSINO") title.innerText = "Escolha alguém para eliminar:";
+      if(myRole === "MEDICO") title.innerText = "Escolha alguém para salvar:";
+      if(myRole === "XERIFE") {
+        title.innerText = "Deseja atirar em alguém?";
+        skipBtn.classList.remove('hidden');
+      }
+
+      Object.entries(roomData.players).forEach(([id, p]) => {
+        if(p.isAlive && id !== playerId) {
+          targetSelect.innerHTML += `<option value="${id}">${p.emoji} ${p.name}</option>`;
+        }
+      });
+    }
+
+    function submitNightAction() {
+      const target = document.getElementById('action-target').value;
+      const roleKey = myRole === "ASSASSINO" ? "killer" : myRole === "MEDICO" ? "medic" : "sheriff";
+      db.ref(`rooms/${currentRoomId}/actions/${roleKey}`).set(target);
+    }
+
+    function skipSheriffAction() {
+      db.ref(`rooms/${currentRoomId}/actions/sheriff`).set("SKIP");
+    }
+
+    function checkNightResolution() {
+      const actions = roomData.actions || {};
+      const aliveRoles = Object.values(roomData.players).filter(p => p.isAlive).map(p => p.role);
+
+      const needsKiller = aliveRoles.includes("ASSASSINO") && (actions.killer === undefined || actions.killer === null);
+      const needsMedic = aliveRoles.includes("MEDICO") && (actions.medic === undefined || actions.medic === null);
+      const needsSheriff = aliveRoles.includes("XERIFE") && (actions.sheriff === undefined || actions.sheriff === null);
+
+      if(!needsKiller && !needsMedic && !needsSheriff) {
+        let updates = {};
+        let killedPlayers = [];
+
+        if(actions.killer && actions.killer !== actions.medic) {
+          killedPlayers.push(actions.killer);
+        }
+
+        if(actions.sheriff && actions.sheriff !== "SKIP") {
+          const target = roomData.players[actions.sheriff];
+          if(target && target.role === "ASSASSINO") {
+            killedPlayers.push(actions.sheriff);
+          } else {
+            const sheriffId = Object.keys(roomData.players).find(k => roomData.players[k].role === "XERIFE");
+            if(sheriffId) killedPlayers.push(sheriffId);
+          }
+        }
+
+        killedPlayers.forEach(id => {
+          updates[`/rooms/${currentRoomId}/players/${id}/isAlive`] = false;
+        });
+
+        updates[`/rooms/${currentRoomId}/state`] = "DAY";
+        db.ref().update(updates).then(() => checkWinConditions());
+      }
+    }
+
+    function setupDayVoting(me) {
+      const panel = document.getElementById('vote-action-panel');
+      const targetSelect = document.getElementById('vote-target');
+
+      if(!me.isAlive || (roomData.votes && roomData.votes[playerId])) {
+        panel.classList.add('hidden');
+        return;
+      }
+
+      panel.classList.remove('hidden');
+      targetSelect.innerHTML = "";
+
+      Object.entries(roomData.players).forEach(([id, p]) => {
+        if(p.isAlive) {
+          targetSelect.innerHTML += `<option value="${id}">${p.emoji} ${p.name}</option>`;
+        }
+      });
+    }
+
+    function submitVote() {
+      const target = document.getElementById('vote-target').value;
+      db.ref(`rooms/${currentRoomId}/votes/${playerId}`).set(target);
+    }
+
+    function checkDayResolution() {
+      const votes = roomData.votes || {};
+      const alivePlayers = Object.entries(roomData.players).filter(([_, p]) => p.isAlive);
+
+      if(Object.keys(votes).length >= alivePlayers.length && alivePlayers.length > 0) {
+        const voteCounts = {};
+        Object.values(votes).forEach(target => {
+          voteCounts[target] = (voteCounts[target] || 0) + 1;
+        });
+
+        let mostVoted = null;
+        let maxVotes = 0;
+        Object.entries(voteCounts).forEach(([target, count]) => {
+          if(count > maxVotes) {
+            maxVotes = count;
+            mostVoted = target;
+          }
+        });
+
+        let updates = {};
+        if(mostVoted) {
+          updates[`/rooms/${currentRoomId}/players/${mostVoted}/isAlive`] = false;
+        }
+
+        updates[`/rooms/${currentRoomId}/state`] = "NIGHT";
+        updates[`/rooms/${currentRoomId}/actions`] = { killer: null, medic: null, sheriff: null };
+        updates[`/rooms/${currentRoomId}/votes`] = {};
+
+        db.ref().update(updates).then(() => checkWinConditions());
+      }
+    }
+
+    function checkWinConditions() {
+      const players = Object.values(roomData.players);
+      const alivePlayers = players.filter(p => p.isAlive);
+      const killerAlive = alivePlayers.some(p => p.role === "ASSASSINO");
+
+      let winner = null;
+
+      if(!killerAlive) {
+        winner = "Os Inocentes Venceram! 🎉";
+      } else if(alivePlayers.length <= 2) {
+        winner = "O Assassino Venceu! 🔪";
+      }
+
+      if(winner) {
+        db.ref(`rooms/${currentRoomId}`).update({
+          state: "GAME_OVER",
+          winner: winner
+        });
+      }
+    }
+  </script>
+</body>
+</html>
